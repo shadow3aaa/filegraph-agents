@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import os
 import threading
 from concurrent.futures import Future
 from dataclasses import dataclass, field
@@ -47,9 +48,12 @@ class FGARuntime:
         n = self.config.max_parallel_talks
         self._llm_semaphore = threading.Semaphore(n) if n and n > 0 else None
         self.actors["__main__"] = MainActor("__main__", self)
-        # Init timestamped log file
+        # Init timestamped log file. FGA_LOG_DIR lets callers (e.g. sandboxed
+        # eval harnesses) redirect logs out of the repo so they don't pollute a
+        # diff-based submission; defaults to <repo>/outputs.
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_dir = Path(self.root) / "outputs"
+        log_root = os.getenv("FGA_LOG_DIR")
+        log_dir = Path(log_root) if log_root else Path(self.root) / "outputs"
         log_dir.mkdir(parents=True, exist_ok=True)
         self._log_path: Path = log_dir / f"{ts}.txt"
         self._log_path.write_text("", encoding="utf-8")
