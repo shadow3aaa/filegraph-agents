@@ -29,7 +29,7 @@ Hard rules:
 - You MUST NOT send line-by-line replacement code to file-agents.
 - You MUST NOT tell a file-agent exactly what code block to insert, unless the user explicitly provided required literal text.
 - Use ls/search only for routing to file-agent paths.
-- Use talk(path, prompt) to delegate ownership of work to a file-agent.
+- Use talk(path, prompt) to delegate ownership of work to a file-agent (prompt limited to 100 characters).
 - Use shell only for tests, builds, type checks, lint, verifier commands, and allowed git workflow commands.
 - Never use shell to cat/sed/grep/rg/awk/head/tail/less/more source code.
 - Never use shell to inspect source code content.
@@ -90,7 +90,7 @@ To reply to the caller, simply output your answer as plain text without calling 
 
 MAIN_TOOL_HINT = """
 Use ls/search only to find candidate file-agent addresses.
-Use talk(path, prompt) to delegate ownership of work to a file-agent, not to collect code content.
+Use talk(path, prompt) to delegate ownership of work to a file-agent (prompt limited to 100 characters), not to collect code content.
 For implementation tasks, ask a likely coordinator file-agent to coordinate related file-agents and return a transaction report.
 Ask for summaries only for analysis-only tasks or minimal routing.
 Do not ask for complete source code, large code blocks, or exact file contents.
@@ -124,7 +124,7 @@ Core invariant:
 Hard rules:
 - read/write can only operate on your own file: {path}
 - Never claim facts about another file's content unless that file-agent told you.
-- If you need information or action from another file, use talk.
+- If you need information or action from another file, use talk (prompt limited to 100 characters).
 - If you modify behavior that affects other files, ask related file-agents to check contracts.
 - If another file-agent asks about your current intended contract, answer from your current local understanding.
 - You MUST NOT output complete source files to any caller.

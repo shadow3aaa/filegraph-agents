@@ -199,7 +199,7 @@ class BaseActor:
                         "type": "object",
                         "properties": {
                             "path": {"type": "string", "description": "Target file path"},
-                            "prompt": {"type": "string", "description": "Question or request for the file agent"},
+                            "prompt": {"type": "string", "description": "Question or request for the file agent", "maxLength": 100},
                         },
                         "required": ["path", "prompt"],
                     },
@@ -379,6 +379,11 @@ class BaseActor:
         if len(talk_calls) == 1:
             results[talk_calls[0].id] = self._run_single_tool(talk_calls[0], event)
         elif talk_calls:
+            # Validate all prompts before sending in parallel
+            for tc in talk_calls:
+                prompt = str(tc.arguments.get("prompt", ""))
+                if len(prompt) > 100:
+                    raise ToolError("talk prompt must be 100 characters or fewer")
             requests = [
                 (str(tc.arguments.get("path", "")), str(tc.arguments.get("prompt", "")))
                 for tc in talk_calls
@@ -432,6 +437,8 @@ class BaseActor:
         if action == "talk":
             path = str(args.get("path", ""))
             prompt = str(args.get("prompt", ""))
+            if len(prompt) > 100:
+                raise ToolError("talk prompt must be 100 characters or fewer")
             response = self.runtime.talk(
                 caller=self.actor_id,
                 target=path,
