@@ -21,7 +21,7 @@ agents:
   - import_path: filegraph_agents.integrations.pier:FGAAgent
 
 datasets:
-  - path: ../deep-swe/tasks
+  - path: deep-swe/tasks
     # Start with a single Python task to validate the end-to-end loop; add more
     # task_names (or drop this list to run all) once it works.
     task_names:
