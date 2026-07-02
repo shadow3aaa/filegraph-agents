@@ -113,13 +113,19 @@ class FGAAgent(BaseInstalledAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        # FGA configures itself from the environment (FGA_MODEL / FGA_BASE_URL /
+        # FGA_API_KEY / ...), so we simply forward every FGA_* var from the host
+        # into the sandbox. No provider settings need to live in the job config.
+        forwarded = {
+            key: value
+            for key, value in self._get_env_prefixed("FGA_").items()
+            # _get_env_prefixed strips the prefix; re-add it below.
+        }
         env = self.build_process_env(
             {
-                "FGA_MODEL": self._fga_model(),
-                "FGA_BASE_URL": self._get_env("FGA_BASE_URL"),
-                "FGA_API_KEY": self._get_env("FGA_API_KEY"),
-                # FGA writes run logs under this dir; keep it out of the repo so
-                # it does not pollute the captured patch.
+                **{f"FGA_{k}": v for k, v in forwarded.items()},
+                # Keep FGA's run logs out of the repo so they don't pollute the
+                # diff-based submission.
                 "FGA_LOG_DIR": "/tmp/fga-logs",
             }
         )
@@ -143,16 +149,4 @@ class FGAAgent(BaseInstalledAgent):
     def populate_context_post_run(self, context: AgentContext) -> None:
         # FGA does not emit an ATIF trajectory; grading is patch-based, so token
         # accounting is best-effort and left empty here.
-        return None
-
-    # --- helpers -----------------------------------------------------------
-
-    def _fga_model(self) -> str | None:
-        """FGA's model name. Prefer the explicit FGA_MODEL env; otherwise fall
-        back to Pier's --model, stripping any provider prefix since FGA adds its
-        own openai/ prefix for OpenAI-compatible endpoints."""
-        if model := self._get_env("FGA_MODEL"):
-            return model
-        if self.model_name:
-            return self.model_name.split("/", 1)[-1]
         return None

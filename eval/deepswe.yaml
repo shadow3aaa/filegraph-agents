@@ -1,0 +1,28 @@
+# Pier job config for running FileGraph Agents on the DeepSWE benchmark.
+#
+# This file only configures Pier's run scope (which tasks, container env,
+# concurrency). Provider settings (model, base URL, API key) are NOT here:
+# FGA reads FGA_MODEL / FGA_BASE_URL / FGA_API_KEY from the environment (and
+# .env), and the Pier adapter forwards every FGA_* var from the host into the
+# sandbox automatically.
+#
+# Usage (from the repo root, with FGA_* set in your shell or .env):
+#   pier run -c eval/deepswe.yaml
+#
+# Point `datasets[].path` at a local clone of https://github.com/datacurve-ai/deep-swe
+
+job_name: fga-deepswe
+n_concurrent_trials: 1
+
+environment:
+  type: docker
+
+agents:
+  - import_path: filegraph_agents.integrations.pier:FGAAgent
+
+datasets:
+  - path: ../deep-swe/tasks
+    # Start with a single Python task to validate the end-to-end loop; add more
+    # task_names (or drop this list to run all) once it works.
+    task_names:
+      - bandit-incremental-cache-control
