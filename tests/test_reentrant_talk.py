@@ -48,7 +48,7 @@ class ReentrantTalkTests(unittest.TestCase):
 
                 raise AssertionError(actor_id)
 
-            config = FGAConfig(max_talk_depth=8, max_messages_per_task=20)
+            config = FGAConfig()
             rt = FGARuntime(root, model=ScriptedModel(handler), config=config)
             result = rt.talk(caller="user", target="a.py", prompt="start", depth=0)
             self.assertEqual(result, "A got B final")

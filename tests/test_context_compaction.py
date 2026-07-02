@@ -20,7 +20,8 @@ class ContextCompactionTests(unittest.TestCase):
         return rt
 
     def test_no_compaction_below_threshold(self):
-        config = FGAConfig(max_context_tokens=10_000, keep_recent_messages=4)
+        # Window pinned via override; watermark = 10000 * 0.75 = 7500 tokens.
+        config = FGAConfig(context_window_override=10_000, chars_per_token=1)
         rt = self._runtime(config)
         actor = rt.get_actor("a.py")
         actor.messages = [
@@ -33,8 +34,9 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertEqual(actor.messages, before)
 
     def test_compaction_keeps_system_and_recent(self):
-        # Small budget forces compaction. chars_per_token=1 => 1 char ~ 1 token.
-        config = FGAConfig(max_context_tokens=50, keep_recent_messages=4, chars_per_token=1)
+        # chars_per_token=1 => 1 char ~ 1 token. window=100 => watermark=75,
+        # keep_budget = 100 * 0.4 = 40 tokens of the most recent turns.
+        config = FGAConfig(context_window_override=100, chars_per_token=1)
         rt = self._runtime(config)
         actor = rt.get_actor("a.py")
         actor.messages = [{"role": "system", "content": "SYSTEM"}]
@@ -48,13 +50,15 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertEqual(actor.messages[0]["content"], "SYSTEM")
         # Summary inserted right after system.
         self.assertIn("SUMMARY", actor.messages[1]["content"])
-        # Most recent turns preserved verbatim.
+        # Most recent turn preserved verbatim.
         self.assertEqual(actor.messages[-1]["content"], "turn-19 " + "x" * 20)
-        # Overall much smaller than the original 21 messages.
-        self.assertLessEqual(len(actor.messages), 4 + 2)
+        # Much smaller than the original 21 messages.
+        self.assertLess(len(actor.messages), 21)
 
     def test_compaction_never_orphans_tool_message(self):
-        config = FGAConfig(max_context_tokens=50, keep_recent_messages=1, chars_per_token=1)
+        config = FGAConfig(
+            context_window_override=60, keep_recent_ratio=0.05, chars_per_token=1
+        )
         rt = self._runtime(config)
         actor = rt.get_actor("a.py")
         # Build history where the desired cut would land on a tool message.

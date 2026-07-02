@@ -45,7 +45,7 @@ class ParallelTalkTests(unittest.TestCase):
                         active -= 1
                 return ModelResponse(content=f"{actor_id} ok")
 
-            config = FGAConfig(max_talk_depth=8, max_messages_per_task=50)
+            config = FGAConfig()
             rt = FGARuntime(root, model=ScriptedModel(handler), config=config)
             result = rt.run("fan out")
 

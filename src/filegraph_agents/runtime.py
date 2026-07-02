@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from .actor import BaseActor, FileActor, MainActor, TalkEvent
 from .config import FGAConfig
-from .errors import BudgetExceeded, PermissionDenied, ToolError
+from .errors import PermissionDenied, ToolError
 from .llm import ChatModel, LiteLLMModel
 from .mailbox import ActorMailbox
 from .observer import FGAObserver, NullObserver
@@ -40,9 +40,12 @@ class FGARuntime:
         self.actors: dict[str, BaseActor] = {}
         self.mailboxes: dict[str, ActorMailbox] = {}
         self._actors_lock = threading.Lock()
-        self._budget_lock = threading.Lock()
         self._log_lock = threading.Lock()
-        self.messages_used = 0
+        # Caps simultaneous in-flight LLM requests. The slot is only held around
+        # the actual API call, never while an actor waits on nested talks, so a
+        # talk chain longer than the limit cannot deadlock.
+        n = self.config.max_parallel_talks
+        self._llm_semaphore = threading.Semaphore(n) if n and n > 0 else None
         self.actors["__main__"] = MainActor("__main__", self)
         # Init timestamped log file
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -55,10 +58,6 @@ class FGARuntime:
     @property
     def main(self) -> MainActor:
         return self.actors["__main__"]  # type: ignore[return-value]
-
-    def reset_budgets(self) -> None:
-        with self._budget_lock:
-            self.messages_used = 0
 
     def ensure_file_actor(self, path: str) -> FileActor:
         rel = self.workspace.rel(path)
@@ -100,16 +99,6 @@ class FGARuntime:
     ) -> TalkEvent:
         if not prompt.strip():
             raise ToolError("talk prompt must not be empty")
-        if depth > self.config.max_talk_depth:
-            raise BudgetExceeded(
-                f"talk depth exceeded {self.config.max_talk_depth}; target={target}"
-            )
-        with self._budget_lock:
-            self.messages_used += 1
-            if self.messages_used > self.config.max_messages_per_task:
-                raise BudgetExceeded(
-                    f"message budget exceeded {self.config.max_messages_per_task}"
-                )
         return TalkEvent(
             caller=caller,
             target=target,
@@ -186,13 +175,57 @@ class FGARuntime:
                 results.append((target, fut.result()))
         return results
 
+    def resolve_context_window(self) -> int:
+        """Context window (in tokens) for the configured model.
+
+        Prefers an explicit override, then litellm's model catalog, then the
+        configured fallback. Cached so the lookup happens at most once.
+        """
+        cached = getattr(self, "_context_window", None)
+        if cached is not None:
+            return cached
+        if self.config.context_window_override > 0:
+            window = self.config.context_window_override
+        else:
+            window = self._lookup_context_window() or self.config.context_window_fallback
+        self._context_window = window
+        return window
+
+    def _lookup_context_window(self) -> int | None:
+        try:
+            import litellm
+
+            model = self.config.model
+            for candidate in (model, model.split("/", 1)[-1]):
+                try:
+                    info = litellm.get_model_info(candidate)
+                except Exception:
+                    continue
+                tokens = info.get("max_input_tokens") or info.get("max_tokens")
+                if tokens:
+                    return int(tokens)
+        except Exception:
+            pass
+        return None
+
+    def complete_model(self, actor_id, messages, tools):
+        """Call the model, bounded by the global in-flight request limit.
+
+        The semaphore slot is held only for the duration of this synchronous
+        call, so it is released before the actor blocks on any nested talk.
+        """
+        if self._llm_semaphore is None:
+            return self.model.complete(actor_id, messages, tools)
+        with self._llm_semaphore:
+            return self.model.complete(actor_id, messages, tools)
+
     def shutdown(self) -> None:
         with self._actors_lock:
             mailboxes = list(self.mailboxes.values())
             self.mailboxes.clear()
         for mb in mailboxes:
             mb.shutdown()
-    def log_raw(self, actor_id: str, step: int, max_steps: int, caller: str,
+    def log_raw(self, actor_id: str, step: int, caller: str,
                 messages: list[dict], response: object) -> None:
         """Append raw agent conversation to the run log file."""
         from .llm import ModelResponse
@@ -207,7 +240,7 @@ class FGARuntime:
             resp_content = str(response)
         lines = [
             "=" * 60,
-            f"agent: {actor_id} | step {step}/{max_steps} | caller: {caller}",
+            f"agent: {actor_id} | step {step} | caller: {caller}",
             "=" * 60,
         ]
         for msg in messages:
@@ -234,7 +267,6 @@ class FGARuntime:
                 f.write("\n".join(lines) + "\n")
 
     def run(self, instruction: str) -> str:
-        self.reset_budgets()
         try:
             return self.main.handle_talk(
                 TalkEvent(

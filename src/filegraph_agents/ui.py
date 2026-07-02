@@ -16,7 +16,6 @@ class _Node:
     parent: "_Node | None" = None
     children: list["_Node"] = field(default_factory=list)
     step: int = 0
-    max_steps: int = 0
     state: str = "thinking"  # thinking | done
 
 
@@ -74,8 +73,8 @@ class RichObserver:
         else:
             label.append("◆ ", style="yellow")
         label.append(self._short(node.actor_id), style="bold")
-        if node.max_steps:
-            label.append(f"  step {node.step}/{node.max_steps}", style="dim")
+        if node.step:
+            label.append(f"  step {node.step}", style="dim")
         if node.state == "done":
             label.append("  replied", style="green dim")
         return label
@@ -131,16 +130,15 @@ class RichObserver:
             parent.children.append(_Node(actor_id=target, depth=depth, parent=parent))
             self._refresh()
 
-    def on_step(self, *, actor_id: str, step: int, max_steps: int) -> None:
+    def on_step(self, *, actor_id: str, step: int) -> None:
         with self._lock:
             node = self._find(actor_id)
             if node is not None:
                 node.step = step
-                node.max_steps = max_steps
                 node.state = "thinking"
             self._refresh()
 
-    def on_reply(self, *, actor_id: str, depth: int) -> None:
+    def on_reply(self, *, actor_id: str) -> None:
         with self._lock:
             node = self._find(actor_id)
             if node is not None:

@@ -15,17 +15,29 @@ class FGAConfig:
     temperature: float = 0.2
     max_tokens: int = 4096
 
-    max_talk_depth: int = 8
-    max_messages_per_task: int = 60
-    max_agent_steps: int = 24
     tool_result_chars: int = 8000
     shell_timeout_seconds: int = 120
 
+    # Max LLM requests in flight at once across all actors. Actors still run on
+    # their own threads, but this caps simultaneous API calls so a wide talk
+    # fan-out does not overwhelm rate-limited providers. Set <= 0 to disable.
+    max_parallel_talks: int = 4
+
     # Context window management for each actor's persistent conversation.
-    # When the estimated token count exceeds max_context_tokens, older turns are
-    # summarized and replaced, keeping system + the most recent turns intact.
-    max_context_tokens: int = 24000
-    keep_recent_messages: int = 12
+    #
+    # The compaction watermark is derived from the model's real context window
+    # (looked up from litellm's catalog) times context_use_ratio. When an actor's
+    # estimated tokens exceed that, older turns are summarized, keeping system +
+    # the most recent turns whose tokens fit keep_recent_ratio of the window.
+    #
+    # context_window_override forces a specific window size (in tokens) instead of
+    # catalog lookup; context_window_fallback is used only when the model is not
+    # found in the catalog.
+    context_use_ratio: float = 0.75
+    keep_recent_ratio: float = 0.4
+    context_window_override: int = 0
+    context_window_fallback: int = 32000
+    keep_recent_messages_floor: int = 4
     chars_per_token: int = 4
 
     # The shell is intentionally not a code-reading/editing tool.
@@ -55,10 +67,10 @@ class FGAConfig:
             api_key_env=os.getenv("FGA_API_KEY_ENV", "DEEPSEEK_API_KEY"),
             temperature=float(os.getenv("FGA_TEMPERATURE", "0.2")),
             max_tokens=int(os.getenv("FGA_MAX_TOKENS", "4096")),
-            max_talk_depth=int(os.getenv("FGA_MAX_TALK_DEPTH", "8")),
-            max_messages_per_task=int(os.getenv("FGA_MAX_MESSAGES", "60")),
-            max_agent_steps=int(os.getenv("FGA_MAX_AGENT_STEPS", "24")),
             shell_timeout_seconds=int(os.getenv("FGA_SHELL_TIMEOUT", "120")),
-            max_context_tokens=int(os.getenv("FGA_MAX_CONTEXT_TOKENS", "24000")),
-            keep_recent_messages=int(os.getenv("FGA_KEEP_RECENT_MESSAGES", "12")),
+            context_use_ratio=float(os.getenv("FGA_CONTEXT_USE_RATIO", "0.75")),
+            keep_recent_ratio=float(os.getenv("FGA_KEEP_RECENT_RATIO", "0.4")),
+            context_window_override=int(os.getenv("FGA_CONTEXT_WINDOW", "0")),
+            context_window_fallback=int(os.getenv("FGA_CONTEXT_WINDOW_FALLBACK", "32000")),
+            max_parallel_talks=int(os.getenv("FGA_MAX_PARALLEL_TALKS", "4")),
         )

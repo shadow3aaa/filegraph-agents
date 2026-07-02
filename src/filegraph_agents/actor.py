@@ -94,19 +94,40 @@ class BaseActor:
             i -= 1
         return i
 
+    def _keep_recent_cut(self, keep_token_budget: int) -> int:
+        """Index where the kept tail should start, walking back from the end
+        until the tail's tokens exceed keep_token_budget (with a message floor)."""
+        floor = self.config.keep_recent_messages_floor
+        i = len(self.messages)
+        tokens = 0
+        kept = 0
+        while i > 1:
+            tokens += self._estimate_tokens([self.messages[i - 1]])
+            kept += 1
+            if tokens > keep_token_budget and kept >= floor:
+                break
+            i -= 1
+        return i
+
     def _compact_history(self) -> None:
         """Summarize older turns when the conversation grows too large.
 
-        Keeps the system message and the most recent turns verbatim; replaces the
-        middle with one summary message. Tool-call groups are never split.
+        The watermark and keep budget are derived from the model's real context
+        window: compact when tokens exceed window * context_use_ratio, then keep
+        system + the most recent turns fitting window * keep_recent_ratio. The
+        middle is replaced with one summary. Tool-call groups are never split.
         """
-        if self._estimate_tokens(self.messages) <= self.config.max_context_tokens:
+        window = self.runtime.resolve_context_window()
+        watermark = int(window * self.config.context_use_ratio)
+        keep_budget = int(window * self.config.keep_recent_ratio)
+
+        if self._estimate_tokens(self.messages) <= watermark:
             return
-        if len(self.messages) <= self.config.keep_recent_messages + 2:
+        if len(self.messages) <= self.config.keep_recent_messages_floor + 2:
             return
 
         head = self.messages[0:1]  # system
-        desired_cut = len(self.messages) - self.config.keep_recent_messages
+        desired_cut = self._keep_recent_cut(keep_budget)
         cut = self._safe_cut_index(self.messages, max(1, desired_cut))
         older = self.messages[1:cut]
         tail = self.messages[cut:]
@@ -130,7 +151,7 @@ class BaseActor:
             {"role": "system", "content": SUMMARIZE_SYSTEM},
             {"role": "user", "content": summarize_user_prompt(transcript)},
         ]
-        response = self.runtime.model.complete(self.actor_id, summary_msgs, None)
+        response = self.runtime.complete_model(self.actor_id, summary_msgs, None)
         summary_text = response.content or "(summary unavailable)"
 
         self.runtime.observer.on_compact(actor_id=self.actor_id, dropped=len(older))
@@ -276,21 +297,23 @@ class BaseActor:
             "content": event_user_prompt(caller=event.caller, prompt=event.prompt),
         })
 
-        max_steps = self.config.max_agent_steps
-        for _step in range(max_steps):
-            self.runtime.observer.on_step(
-                actor_id=self.actor_id, step=_step + 1, max_steps=max_steps
-            )
+        # No per-actor step cap: an actor keeps looping until it produces a
+        # reply. The empty-response guard below prevents a no-progress spin, and
+        # cyclic talks are broken by reentrancy (ancestors). Context growth is
+        # handled by compaction, so a long ReAct loop stays within the window.
+        step = 0
+        while True:
+            step += 1
+            self.runtime.observer.on_step(actor_id=self.actor_id, step=step)
 
             self._compact_history()
             tools = self._get_tool_definitions()
-            response = self.runtime.model.complete(self.actor_id, self.messages, tools)
+            response = self.runtime.complete_model(self.actor_id, self.messages, tools)
 
             # Log raw conversation
             self.runtime.log_raw(
                 actor_id=self.actor_id,
-                step=_step + 1,
-                max_steps=max_steps,
+                step=step,
                 caller=event.caller,
                 messages=self.messages,
                 response=response,
@@ -299,7 +322,7 @@ class BaseActor:
             # Model replied directly — this is the final answer
             if response.content is not None:
                 self.messages.append({"role": "assistant", "content": response.content})
-                self.runtime.observer.on_reply(actor_id=self.actor_id, depth=event.depth)
+                self.runtime.observer.on_reply(actor_id=self.actor_id)
                 return response.content
 
             # Model wants to call tools
@@ -327,10 +350,12 @@ class BaseActor:
                             json.dumps(results[tc.id], ensure_ascii=False)
                         ),
                     })
+                continue
 
-        raise FGAError(
-            f"{self.actor_id} exceeded max_agent_steps={max_steps}"
-        )
+            # Neither content nor tool calls: nothing to do, and looping again
+            # would just repeat. Treat it as an empty reply to avoid spinning.
+            self.runtime.observer.on_reply(actor_id=self.actor_id)
+            return ""
 
     def _execute_tool_calls(
         self, tool_calls: list[ToolCall], event: TalkEvent

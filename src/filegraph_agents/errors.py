@@ -8,7 +8,3 @@ class ToolError(FGAError):
 
 class PermissionDenied(ToolError):
     """An actor attempted an operation outside its authority."""
-
-
-class BudgetExceeded(FGAError):
-    """A task exceeded configured runtime budget."""
