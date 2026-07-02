@@ -1,0 +1,472 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import json
+from typing import Any, TYPE_CHECKING
+
+from .config import FGAConfig
+from .errors import FGAError, PermissionDenied, ToolError
+from .llm import ModelResponse, ToolCall
+from .prompts import (
+    MAIN_SYSTEM,
+    SUMMARIZE_SYSTEM,
+    event_user_prompt,
+    file_system,
+    summarize_user_prompt,
+)
+
+if TYPE_CHECKING:
+    from .runtime import FGARuntime
+
+
+@dataclass(slots=True)
+class TalkEvent:
+    caller: str
+    target: str
+    prompt: str
+    tx_id: str
+    depth: int = 0
+    # actor_ids currently on the logical call chain leading to this talk.
+    # Used to detect reentrancy (a talk targeting an ancestor) so it runs
+    # synchronously instead of deadlocking on that ancestor's mailbox.
+    ancestors: frozenset[str] = frozenset()
+
+
+@dataclass
+class BaseActor:
+    actor_id: str
+    runtime: "FGARuntime"
+    messages: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def config(self) -> FGAConfig:
+        return self.runtime.config
+
+    @property
+    def system_prompt(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def default_ls_dir(self) -> str | None:
+        return None
+
+    def can_shell(self) -> bool:
+        return False
+
+    def can_read_write(self) -> bool:
+        return False
+
+    def _ensure_history(self) -> None:
+        """Lazily seed the persistent conversation with the system prompt."""
+        if not self.messages:
+            self.messages.append({"role": "system", "content": self.system_prompt})
+
+    def _estimate_tokens(self, messages: list[dict[str, Any]]) -> int:
+        chars = 0
+        for m in messages:
+            chars += len(m.get("content") or "")
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function", {})
+                chars += len(fn.get("name", "")) + len(fn.get("arguments", ""))
+        return chars // max(1, self.config.chars_per_token)
+
+    @staticmethod
+    def _safe_cut_index(messages: list[dict[str, Any]], desired: int) -> int:
+        """Return a cut index that does not split a tool-call group.
+
+        The kept tail must begin on a self-contained turn, never on a bare tool
+        result. We move the cut *backward* to the start of the group so the
+        assistant tool_calls stay attached to their tool results in the tail.
+        """
+        i = min(desired, len(messages))
+        n = len(messages)
+
+        def invalid(idx: int) -> bool:
+            if idx >= n:
+                return False
+            if messages[idx].get("role") == "tool":
+                return True  # tail can't start on a bare tool result
+            if idx > 0 and messages[idx - 1].get("tool_calls"):
+                return True  # would split an assistant call from its results
+            return False
+
+        while i > 1 and invalid(i):
+            i -= 1
+        return i
+
+    def _compact_history(self) -> None:
+        """Summarize older turns when the conversation grows too large.
+
+        Keeps the system message and the most recent turns verbatim; replaces the
+        middle with one summary message. Tool-call groups are never split.
+        """
+        if self._estimate_tokens(self.messages) <= self.config.max_context_tokens:
+            return
+        if len(self.messages) <= self.config.keep_recent_messages + 2:
+            return
+
+        head = self.messages[0:1]  # system
+        desired_cut = len(self.messages) - self.config.keep_recent_messages
+        cut = self._safe_cut_index(self.messages, max(1, desired_cut))
+        older = self.messages[1:cut]
+        tail = self.messages[cut:]
+        if not older:
+            return
+
+        transcript_parts: list[str] = []
+        for m in older:
+            role = m.get("role", "?")
+            if m.get("tool_calls"):
+                calls = ", ".join(
+                    f"{tc['function']['name']}({tc['function']['arguments']})"
+                    for tc in m["tool_calls"]
+                )
+                transcript_parts.append(f"[{role} tool_calls] {calls}")
+            else:
+                transcript_parts.append(f"[{role}] {m.get('content') or ''}")
+        transcript = self._truncate("\n".join(transcript_parts))
+
+        summary_msgs = [
+            {"role": "system", "content": SUMMARIZE_SYSTEM},
+            {"role": "user", "content": summarize_user_prompt(transcript)},
+        ]
+        response = self.runtime.model.complete(self.actor_id, summary_msgs, None)
+        summary_text = response.content or "(summary unavailable)"
+
+        self.runtime.observer.on_compact(actor_id=self.actor_id, dropped=len(older))
+        self.messages[:] = head + [
+            {"role": "user", "content": f"Summary of earlier conversation:\n{summary_text}"}
+        ] + tail
+
+    def _get_tool_definitions(self) -> list[dict[str, Any]]:
+        """Build OpenAI-compatible tool definitions from actor capabilities."""
+        tools: list[dict[str, Any]] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "ls",
+                    "description": "List files and directories in the workspace",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Directory path (optional)"}
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search for literal text across the workspace. Returns file paths with match counts, never code content.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "description": "Literal text to search for"},
+                            "max_results": {"type": "integer", "description": "Max results (default 20)"},
+                        },
+                        "required": ["content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "talk",
+                    "description": "Talk to another file agent. Use this instead of reading other files directly.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Target file path"},
+                            "prompt": {"type": "string", "description": "Question or request for the file agent"},
+                        },
+                        "required": ["path", "prompt"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_file",
+                    "description": "Create an empty file and spawn its file agent. Then talk to it to write content.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Path for the new file"},
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "delete_file",
+                    "description": "Delete a file and stop its file agent.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Path to delete"},
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+        ]
+
+        if self.can_shell():
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "shell",
+                    "description": "Run shell commands (tests, builds, type checks, lint, or verifier commands only).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "Shell command to execute"},
+                        },
+                        "required": ["command"],
+                    },
+                },
+            })
+
+        if self.can_read_write():
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "Read lines from your own file.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "start_line": {"type": "integer", "description": "First line (1-based)"},
+                            "offset": {"type": "integer", "description": "Number of lines to read"},
+                        },
+                        "required": ["start_line", "offset"],
+                    },
+                },
+            })
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "write",
+                    "description": "Write content to your own file. Replaces inclusive [start_line,end_line]. Use end_line=start_line-1 for insertion.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "start_line": {"type": "integer", "description": "First line to replace (1-based)"},
+                            "end_line": {"type": "integer", "description": "Last line to replace (inclusive)"},
+                            "content": {"type": "string", "description": "New content"},
+                        },
+                        "required": ["start_line", "end_line", "content"],
+                    },
+                },
+            })
+
+        return tools
+
+    def handle_talk(self, event: TalkEvent) -> str:
+        # The actor keeps one persistent ReAct conversation. Each incoming talk
+        # is appended as a new user turn to that same history. This is what
+        # makes reentrancy safe: a nested talk to this same actor appends to and
+        # runs over the very same message list, so there is no context split.
+        self._ensure_history()
+        self.messages.append({
+            "role": "user",
+            "content": event_user_prompt(caller=event.caller, prompt=event.prompt),
+        })
+
+        max_steps = self.config.max_agent_steps
+        for _step in range(max_steps):
+            self.runtime.observer.on_step(
+                actor_id=self.actor_id, step=_step + 1, max_steps=max_steps
+            )
+
+            self._compact_history()
+            tools = self._get_tool_definitions()
+            response = self.runtime.model.complete(self.actor_id, self.messages, tools)
+
+            # Log raw conversation
+            self.runtime.log_raw(
+                actor_id=self.actor_id,
+                step=_step + 1,
+                max_steps=max_steps,
+                caller=event.caller,
+                messages=self.messages,
+                response=response,
+            )
+
+            # Model replied directly — this is the final answer
+            if response.content is not None:
+                self.messages.append({"role": "assistant", "content": response.content})
+                self.runtime.observer.on_reply(actor_id=self.actor_id, depth=event.depth)
+                return response.content
+
+            # Model wants to call tools
+            if response.tool_calls:
+                assistant_tc = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+                    }
+                    for tc in response.tool_calls
+                ]
+                self.messages.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": assistant_tc,
+                })
+
+                results = self._execute_tool_calls(response.tool_calls, event)
+                for tc in response.tool_calls:
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": self._truncate(
+                            json.dumps(results[tc.id], ensure_ascii=False)
+                        ),
+                    })
+
+        raise FGAError(
+            f"{self.actor_id} exceeded max_agent_steps={max_steps}"
+        )
+
+    def _execute_tool_calls(
+        self, tool_calls: list[ToolCall], event: TalkEvent
+    ) -> dict[str, Any]:
+        """Run a step's tool calls, dispatching multiple talks in parallel.
+
+        When the model emits several talk() calls in one step, they are sent to
+        their target actors together so those file-agents run concurrently on
+        their own threads. Non-talk tools (read/write/shell/ls/...) have side
+        effects or touch this actor's own file, so they run serially.
+        """
+        results: dict[str, Any] = {}
+        talk_calls = [tc for tc in tool_calls if tc.name == "talk"]
+
+        # Serial tools first (keep deterministic ordering for side effects).
+        for tc in tool_calls:
+            if tc.name == "talk":
+                continue
+            results[tc.id] = self._run_single_tool(tc, event)
+
+        if len(talk_calls) == 1:
+            results[talk_calls[0].id] = self._run_single_tool(talk_calls[0], event)
+        elif talk_calls:
+            requests = [
+                (str(tc.arguments.get("path", "")), str(tc.arguments.get("prompt", "")))
+                for tc in talk_calls
+            ]
+            try:
+                replies = self.runtime.talk_many(
+                    caller=self.actor_id,
+                    requests=requests,
+                    tx_id=event.tx_id,
+                    depth=event.depth + 1,
+                    ancestors=event.ancestors,
+                )
+            except FGAError as e:
+                for tc in talk_calls:
+                    results[tc.id] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            else:
+                for tc, (path, reply) in zip(talk_calls, replies):
+                    results[tc.id] = {"ok": True, "path": path, "response": reply}
+
+        return results
+
+    def _run_single_tool(self, tc: ToolCall, event: TalkEvent) -> Any:
+        try:
+            return self._dispatch_action(tc.name, tc.arguments, event)
+        except FGAError as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        except Exception as e:
+            return {"ok": False, "error": f"unexpected {type(e).__name__}: {e}"}
+
+    def _truncate(self, text: str) -> str:
+        limit = self.config.tool_result_chars
+        if len(text) <= limit:
+            return text
+        return text[:limit] + f"\n<truncated {len(text) - limit} chars>"
+
+    def _dispatch_action(self, action: str, args: dict[str, Any], event: TalkEvent) -> Any:
+        if action == "ls":
+            return self.runtime.workspace.ls(
+                args.get("path"), default_dir=self.default_ls_dir
+            )
+        if action == "search":
+            return self.runtime.workspace.search(str(args.get("content", "")), max_results=args.get("max_results", 20))
+        if action == "create_file":
+            path = self.runtime.workspace.create_file(str(args.get("path", "")))
+            self.runtime.ensure_file_actor(path)
+            return {"ok": True, "path": path}
+        if action == "delete_file":
+            path = self.runtime.workspace.delete_file(str(args.get("path", "")))
+            self.runtime.stop_file_actor(path)
+            return {"ok": True, "path": path}
+        if action == "talk":
+            path = str(args.get("path", ""))
+            prompt = str(args.get("prompt", ""))
+            response = self.runtime.talk(
+                caller=self.actor_id,
+                target=path,
+                prompt=prompt,
+                tx_id=event.tx_id,
+                depth=event.depth + 1,
+                ancestors=event.ancestors,
+            )
+            return {"ok": True, "path": path, "response": response}
+        if action == "shell":
+            if not self.can_shell():
+                raise PermissionDenied("shell is only available to MainAgent")
+            return self.runtime.shell(str(args.get("command", "")))
+        if action == "read":
+            if not self.can_read_write():
+                raise PermissionDenied("read is only available to FileAgent")
+            return {
+                "ok": True,
+                "content": self.runtime.workspace.read_lines(
+                    self.actor_id,
+                    int(args.get("start_line", 1)),
+                    int(args.get("offset", 120)),
+                ),
+            }
+        if action == "write":
+            if not self.can_read_write():
+                raise PermissionDenied("write is only available to FileAgent")
+            result = self.runtime.workspace.write_lines(
+                self.actor_id,
+                int(args.get("start_line", 1)),
+                int(args.get("end_line", 0)),
+                str(args.get("content", "")),
+            )
+            return {"ok": True, "result": result}
+
+        raise ToolError(f"unknown action: {action}")
+
+
+@dataclass
+class MainActor(BaseActor):
+    @property
+    def system_prompt(self) -> str:
+        return MAIN_SYSTEM
+
+    def can_shell(self) -> bool:
+        return True
+
+
+@dataclass
+class FileActor(BaseActor):
+    @property
+    def system_prompt(self) -> str:
+        return file_system(self.actor_id)
+
+    @property
+    def default_ls_dir(self) -> str | None:
+        # List the file's containing directory by default.
+        if "/" in self.actor_id:
+            return self.actor_id.rsplit("/", 1)[0]
+        return "."
+
+    def can_read_write(self) -> bool:
+        return True
