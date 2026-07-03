@@ -17,8 +17,15 @@ class _Node:
     depth: int
     parent: "_Node | None" = None
     children: list["_Node"] = field(default_factory=list)
-    start_time: float = 0.0
+    _active_elapsed: float = 0.0
+    _active_start: float | None = None
     state: str = "thinking"  # thinking | done
+
+    @property
+    def active_time(self) -> float:
+        if self._active_start is not None:
+            return self._active_elapsed + (time.monotonic() - self._active_start)
+        return self._active_elapsed
 
 
 @dataclass
@@ -39,6 +46,7 @@ class RichObserver:
 
     console: Console = field(default_factory=Console)
     _live: Live | None = field(default=None, init=False)
+    _refresh_stop: threading.Event | None = field(default=None, init=False)
     _root: _Node | None = field(default=None, init=False)
     _model: str = field(default="", init=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
@@ -50,15 +58,12 @@ class RichObserver:
 
     @staticmethod
     def _agent_kind(actor_id: str) -> str:
-        """Return a kind key: 'main', 'verifier', 'file', or 'other'."""
+        """Return a kind key: 'main', 'verifier', or 'file'."""
         if actor_id == "__main__":
             return "main"
-        if "verifier" in actor_id.lower():
+        if actor_id == "__verifier__":
             return "verifier"
-        # Likely a file-agent if it looks like a path (contains / or .py)
-        if "/" in actor_id or actor_id.endswith(".py"):
-            return "file"
-        return "other"
+        return "file"
 
     @staticmethod
     def _agent_style(kind: str) -> str:
@@ -66,8 +71,7 @@ class RichObserver:
             "main": "bold cyan",
             "verifier": "bold magenta",
             "file": "bold green",
-            "other": "bold white",
-        }.get(kind, "bold white")
+        }[kind]
 
     @staticmethod
     def _agent_icon(kind: str) -> str:
@@ -75,8 +79,7 @@ class RichObserver:
             "main": "◆",
             "verifier": "▲",
             "file": "●",
-            "other": "■",
-        }.get(kind, "■")
+        }[kind]
 
     def _short(self, actor_id: str) -> str:
         """Return a short display label for a tree node."""
@@ -137,8 +140,8 @@ class RichObserver:
         style = self._agent_style(kind)
         label.append(display, style=style)
 
-        if node.start_time:
-            elapsed = time.monotonic() - node.start_time
+        elapsed = node.active_time
+        if elapsed > 0:
             if elapsed < 60:
                 time_str = f"{elapsed:.1f}s"
             else:
@@ -218,10 +221,19 @@ class RichObserver:
     def on_start(self, *, model: str, repo: str, instruction: str) -> None:
         self._model = model
         self._seen_agents.add("__main__")
-        self._root = _Node(actor_id="__main__", depth=0, start_time=time.monotonic())
+        self._root = _Node(actor_id="__main__", depth=0, _active_start=time.monotonic())
         self.console.print(
             Text.assemble(("▸ ", "cyan"), (instruction.strip()[:200], "italic"))
         )
+        # Background timer to refresh the live display every second so
+        # elapsed-time counters stay smooth between observer callbacks.
+        self._refresh_stop = threading.Event()
+        def _ticker():
+            while not self._refresh_stop.wait(1):
+                self._refresh()
+        t = threading.Thread(target=_ticker, daemon=True)
+        t.start()
+
         self._live = Live(
             self._render(),
             console=self.console,
@@ -239,10 +251,10 @@ class RichObserver:
             self._seen_agents.add(caller)
             self._seen_agents.add(target)
             if self._root is None:
-                self._root = _Node(actor_id="__main__", depth=0, start_time=time.monotonic())
+                self._root = _Node(actor_id="__main__", depth=0, _active_start=time.monotonic())
             parent = self._find(caller) or self._root
             parent.children.append(
-                _Node(actor_id=target, depth=depth, parent=parent, start_time=time.monotonic())
+                _Node(actor_id=target, depth=depth, parent=parent, _active_start=time.monotonic())
             )
             self._refresh()
 
@@ -251,7 +263,6 @@ class RichObserver:
             self._seen_agents.add(actor_id)
             node = self._find(actor_id)
             if node is not None:
-                node.start_time = time.monotonic()
                 node.state = "thinking"
             self._refresh()
 
@@ -261,7 +272,24 @@ class RichObserver:
             node = self._find(actor_id)
             if node is not None:
                 node.state = "done"
+                # Freeze active time
+                if node._active_start is not None:
+                    node._active_elapsed += time.monotonic() - node._active_start
+                    node._active_start = None
             self._refresh()
+
+    def on_pause(self, *, actor_id: str) -> None:
+        with self._lock:
+            node = self._find(actor_id)
+            if node is not None and node._active_start is not None:
+                node._active_elapsed += time.monotonic() - node._active_start
+                node._active_start = None
+
+    def on_resume(self, *, actor_id: str) -> None:
+        with self._lock:
+            node = self._find(actor_id)
+            if node is not None and node.state != "done":
+                node._active_start = time.monotonic()
 
     def on_compact(self, *, actor_id: str, dropped: int) -> None:
         with self._lock:
@@ -272,6 +300,8 @@ class RichObserver:
         self.console.print(Text(f"✗ {message}", style="bold red"))
 
     def stop(self) -> None:
+        if self._refresh_stop is not None:
+            self._refresh_stop.set()
         if self._live is not None:
             self._live.stop()
             self._live = None

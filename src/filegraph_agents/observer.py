@@ -14,6 +14,8 @@ class FGAObserver(Protocol):
     def on_reply(self, *, actor_id: str) -> None: ...
     def on_compact(self, *, actor_id: str, dropped: int) -> None: ...
     def on_error(self, message: str) -> None: ...
+    def on_pause(self, *, actor_id: str) -> None: ...
+    def on_resume(self, *, actor_id: str) -> None: ...
 
 
 class NullObserver:
@@ -38,4 +40,10 @@ class NullObserver:
         pass
 
     def on_error(self, message: str) -> None:
+        pass
+
+    def on_pause(self, *, actor_id: str) -> None:
+        pass
+
+    def on_resume(self, *, actor_id: str) -> None:
         pass

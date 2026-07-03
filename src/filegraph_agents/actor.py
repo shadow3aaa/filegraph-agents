@@ -465,7 +465,9 @@ class BaseActor:
                     }
                 )
 
+                self.runtime.observer.on_pause(actor_id=self.actor_id)
                 results = self._execute_tool_calls(response.tool_calls, event)
+                self.runtime.observer.on_resume(actor_id=self.actor_id)
                 for tc in response.tool_calls:
                     self.messages.append(
                         {
