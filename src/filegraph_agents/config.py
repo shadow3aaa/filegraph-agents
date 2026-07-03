@@ -21,7 +21,7 @@ class FGAConfig:
     # Max LLM requests in flight at once across all actors. Actors still run on
     # their own threads, but this caps simultaneous API calls so a wide talk
     # fan-out does not overwhelm rate-limited providers. Set <= 0 to disable.
-    max_parallel_talks: int = 4
+    max_parallel_talks: int = 2
 
     # Context window management for each actor's persistent conversation.
     #
@@ -72,5 +72,5 @@ class FGAConfig:
             keep_recent_ratio=float(os.getenv("FGA_KEEP_RECENT_RATIO", "0.4")),
             context_window_override=int(os.getenv("FGA_CONTEXT_WINDOW", "0")),
             context_window_fallback=int(os.getenv("FGA_CONTEXT_WINDOW_FALLBACK", "32000")),
-            max_parallel_talks=int(os.getenv("FGA_MAX_PARALLEL_TALKS", "4")),
+            max_parallel_talks=int(os.getenv("FGA_MAX_PARALLEL_TALKS", "2")),
         )

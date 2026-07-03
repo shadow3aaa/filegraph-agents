@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 import json
 from typing import Any, TYPE_CHECKING
@@ -416,7 +417,7 @@ class BaseActor:
 
             self._compact_history()
             tools = self._get_tool_definitions()
-            max_attempts = 4
+            max_attempts = 10
             for attempt in range(max_attempts):
                 try:
                     response = self.runtime.complete_model(
@@ -426,6 +427,7 @@ class BaseActor:
                 except FGAError:
                     if attempt == max_attempts - 1:
                         raise
+                    time.sleep(2 ** attempt)
 
             # Log raw conversation
             self.runtime.log_raw(
