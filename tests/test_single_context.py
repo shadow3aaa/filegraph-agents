@@ -19,13 +19,13 @@ class SingleContextTests(unittest.TestCase):
                     tool_rounds = sum(1 for m in messages if m["role"] == "tool")
                     if tool_rounds == 0:
                         return ModelResponse(tool_calls=[
-                            ToolCall(id="1", name="talk",
-                                     arguments={"path": "a.py", "prompt": "first"})
+                        ToolCall(id="1", name="delegate",
+                                 arguments={"path": "a.py", "task": "first"})
                         ])
                     if tool_rounds == 1:
                         return ModelResponse(tool_calls=[
-                            ToolCall(id="2", name="talk",
-                                     arguments={"path": "a.py", "prompt": "second"})
+                        ToolCall(id="2", name="delegate",
+                                 arguments={"path": "a.py", "task": "second"})
                         ])
                     return ModelResponse(content="done")
 

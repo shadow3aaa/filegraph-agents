@@ -29,21 +29,21 @@ class ReentrantTalkTests(unittest.TestCase):
                     if has_c_asks_a:
                         return ModelResponse(content="A answered C using same local context")
                     return ModelResponse(
-                        tool_calls=[ToolCall(id="1", name="talk", arguments={"path": "b.py", "prompt": "A asks B"})],
+                        tool_calls=[ToolCall(id="1", name="delegate", arguments={"path": "b.py", "task": "A asks B"})],
                     )
 
                 if actor_id == "b.py":
                     if has_tool_result:
                         return ModelResponse(content="B got C final")
                     return ModelResponse(
-                        tool_calls=[ToolCall(id="2", name="talk", arguments={"path": "c.py", "prompt": "B asks C"})]
+                        tool_calls=[ToolCall(id="2", name="delegate", arguments={"path": "c.py", "task": "B asks C"})]
                     )
 
                 if actor_id == "c.py":
                     if has_tool_result:
                         return ModelResponse(content="C got A final")
                     return ModelResponse(
-                        tool_calls=[ToolCall(id="3", name="talk", arguments={"path": "a.py", "prompt": "C asks A"})]
+                        tool_calls=[ToolCall(id="3", name="delegate", arguments={"path": "a.py", "task": "C asks A"})]
                     )
 
                 raise AssertionError(actor_id)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
-import re
 from typing import Any, TYPE_CHECKING
 
 from .config import FGAConfig
@@ -11,6 +10,7 @@ from .llm import ToolCall
 from .prompts import (
     MAIN_SYSTEM,
     SUMMARIZE_SYSTEM,
+    VERIFIER_SYSTEM,
     event_user_prompt,
     file_system,
     summarize_user_prompt,
@@ -56,6 +56,24 @@ class BaseActor:
 
     def can_read_write(self) -> bool:
         return False
+
+    def can_plan(self) -> bool:
+        return False
+
+    def can_read(self) -> bool:
+        """Read-only permission (VerifierActor has this without can_read_write)."""
+        return self.can_read_write()
+
+    def can_delegate(self) -> bool:
+        """Whether this actor can talk to others and manage files."""
+        return True
+
+    def can_search(self) -> bool:
+        """Whether this actor can search file contents (MainActor cannot)."""
+        return True
+
+    def _resolve_read_path(self, args: dict[str, Any]) -> str:
+        return self.actor_id
 
     def _ensure_history(self) -> None:
         """Lazily seed the persistent conversation with the system prompt."""
@@ -167,84 +185,6 @@ class BaseActor:
             + tail
         )
 
-    @staticmethod
-    def _looks_like_code_block(response: str) -> bool:
-        """Heuristic: does the response contain significant source code?"""
-        # Triple-backtick code fence
-        if re.search(r"```", response):
-            return True
-        # Count lines that look like code: indented + programming keywords
-        code_lines = 0
-        for line in response.splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith(("#", "//", "/*", "*", "--")):
-                continue
-            if stripped.startswith(
-                (
-                    "def ",
-                    "class ",
-                    "import ",
-                    "from ",
-                    "return ",
-                    "if ",
-                    "elif ",
-                    "else:",
-                    "for ",
-                    "while ",
-                    "try:",
-                    "except",
-                    "with ",
-                    "async ",
-                    "await ",
-                    "yield ",
-                    "raise ",
-                    "pass ",
-                    "break ",
-                    "continue ",
-                    "function ",
-                    "const ",
-                    "let ",
-                    "var ",
-                    "interface ",
-                    "type ",
-                    "export ",
-                    "impl ",
-                    "fn ",
-                    "pub ",
-                    "int ",
-                    "float ",
-                    "String ",
-                    "bool ",
-                    "public ",
-                    "private ",
-                    "protected ",
-                    "static ",
-                    "void ",
-                    "int ",
-                    "string ",
-                    "boolean ",
-                )
-            ):
-                code_lines += 1
-            elif line.startswith(("    ", "\t")) and any(
-                c in stripped for c in ("(", ")", "{", "}", "=", ":", "->")
-            ):
-                code_lines += 1
-            if code_lines >= 5:
-                return True
-        return False
-
-    @staticmethod
-    def _reject_code_in_response(response: str) -> str | None:
-        """Return rejection message if response contains code, else None."""
-        if BaseActor._looks_like_code_block(response):
-            return (
-                "RESPONSE REJECTED: your reply contains source code blocks. "
-                "Do NOT output code. Return a transaction report with status, "
-                "changed_symbols, delegated_to, confirmed_contracts, and unresolved."
-            )
-        return None
-
     def _get_tool_definitions(self) -> list[dict[str, Any]]:
         """Build OpenAI-compatible tool definitions from actor capabilities."""
         tools: list[dict[str, Any]] = [
@@ -264,81 +204,32 @@ class BaseActor:
                     },
                 },
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "search",
-                    "description": "Search for literal text across the workspace. Returns file paths with match counts, never code content.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "content": {
-                                "type": "string",
-                                "description": "Literal text to search for",
-                            },
-                            "max_results": {
-                                "type": "integer",
-                                "description": "Max results (default 20)",
-                            },
-                        },
-                        "required": ["content"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "talk",
-                    "description": "Talk to another file agent. Use this instead of reading other files directly.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "Target file path",
-                            },
-                            "prompt": {
-                                "type": "string",
-                                "description": "Question or request for the file agent",
-                                "maxLength": 100,
-                            },
-                        },
-                        "required": ["path", "prompt"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "create_file",
-                    "description": "Create an empty file and spawn its file agent. Then talk to it to write content.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "Path for the new file",
-                            },
-                        },
-                        "required": ["path"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "delete_file",
-                    "description": "Delete a file and stop its file agent.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "path": {"type": "string", "description": "Path to delete"},
-                        },
-                        "required": ["path"],
-                    },
-                },
-            },
         ]
+
+        if self.can_search():
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search",
+                        "description": "Search for literal text across the workspace. Returns file paths with match counts, never code content.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "content": {
+                                    "type": "string",
+                                    "description": "Literal text to search for",
+                                },
+                                "max_results": {
+                                    "type": "integer",
+                                    "description": "Max results (default 20)",
+                                },
+                            },
+                            "required": ["content"],
+                        },
+                    },
+                },
+            )
 
         if self.can_shell():
             tools.append(
@@ -361,7 +252,91 @@ class BaseActor:
                 }
             )
 
-        if self.can_read_write():
+        if self.can_delegate():
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "delegate",
+                        "description": "Delegate a task to a file agent. This transfers ownership — do NOT ask questions, only assign work.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "description": "Target file path",
+                                },
+                                "task": {
+                                    "type": "string",
+                                    "description": "The task to own and execute",
+                                },
+                            },
+                            "required": ["path", "task"],
+                        },
+                    },
+                },
+            )
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "create_file",
+                        "description": "Create an empty file and spawn its file agent. Then talk to it to write content.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "description": "Path for the new file",
+                                },
+                            },
+                            "required": ["path"],
+                        },
+                    },
+                },
+            )
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "delete_file",
+                        "description": "Delete a file and stop its file agent.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "description": "Path to delete",
+                                },
+                            },
+                            "required": ["path"],
+                        },
+                    },
+                },
+            )
+
+        if self.can_plan():
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "plan",
+                        "description": "Record your current decomposition plan for later reference. Call this whenever you settle on a multi-step strategy so you can recall it in future steps.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "plan": {
+                                    "type": "string",
+                                    "description": "The plan text (steps, targets, reasoning)",
+                                },
+                            },
+                            "required": ["plan"],
+                        },
+                    },
+                }
+            )
+
+        if self.can_read():
             tools.append(
                 {
                     "type": "function",
@@ -385,6 +360,8 @@ class BaseActor:
                     },
                 }
             )
+
+        if self.can_read_write():
             tools.append(
                 {
                     "type": "function",
@@ -424,7 +401,7 @@ class BaseActor:
         self.messages.append(
             {
                 "role": "user",
-                "content": event_user_prompt(caller=event.caller, prompt=event.prompt),
+                "content": event_user_prompt(caller=event.caller, task=event.prompt),
             }
         )
 
@@ -439,7 +416,16 @@ class BaseActor:
 
             self._compact_history()
             tools = self._get_tool_definitions()
-            response = self.runtime.complete_model(self.actor_id, self.messages, tools)
+            max_attempts = 4
+            for attempt in range(max_attempts):
+                try:
+                    response = self.runtime.complete_model(
+                        self.actor_id, self.messages, tools
+                    )
+                    break
+                except FGAError:
+                    if attempt == max_attempts - 1:
+                        raise
 
             # Log raw conversation
             self.runtime.log_raw(
@@ -498,47 +484,37 @@ class BaseActor:
     def _execute_tool_calls(
         self, tool_calls: list[ToolCall], event: TalkEvent
     ) -> dict[str, Any]:
-        """Run a step's tool calls, dispatching multiple talks in parallel.
+        """Run a step's tool calls, dispatching multiple delegates in parallel.
 
-        When the model emits several talk() calls in one step, they are sent to
-        their target actors together so those file-agents run concurrently on
-        their own threads. Non-talk tools (read/write/shell/ls/...) have side
-        effects or touch this actor's own file, so they run serially.
+        When the model emits several delegate() calls in one step, they are sent
+        to their target actors together so those file-agents run concurrently on
+        their own threads. Non-delegate tools (read/write/shell/ls/...) have
+        side effects or touch this actor's own file, so they run serially.
         """
         results: dict[str, Any] = {}
-        talk_calls = [tc for tc in tool_calls if tc.name == "talk"]
+        delegate_calls = [tc for tc in tool_calls if tc.name == "delegate"]
 
         # Serial tools first (keep deterministic ordering for side effects).
         for tc in tool_calls:
-            if tc.name == "talk":
+            if tc.name == "delegate":
                 continue
             results[tc.id] = self._run_single_tool(tc, event)
 
-        if len(talk_calls) == 1:
-            result = self._run_single_tool(talk_calls[0], event)
-            # Heuristic code rejection on single talk response
-            if isinstance(result, dict) and result.get("ok") and "response" in result:
-                rejection = self._reject_code_in_response(str(result["response"]))
-                if rejection:
-                    result = {
-                        "ok": False,
-                        "error": rejection,
-                        "path": result.get("path", ""),
-                    }
-            results[talk_calls[0].id] = result
-        elif talk_calls:
+        if len(delegate_calls) == 1:
+            result = self._run_single_tool(delegate_calls[0], event)
+            results[delegate_calls[0].id] = result
+        elif delegate_calls:
             try:
-                # Validate all prompts before sending in parallel
-                for tc in talk_calls:
-                    prompt = str(tc.arguments.get("prompt", ""))
-                    if len(prompt) > 100:
-                        raise ToolError("talk prompt must be 100 characters or fewer")
+                # Ensure each task is non-empty
+                for tc in delegate_calls:
+                    if not str(tc.arguments.get("task", "")).strip():
+                        raise ToolError("delegate task must not be empty")
                 requests = [
                     (
                         str(tc.arguments.get("path", "")),
-                        str(tc.arguments.get("prompt", "")),
+                        str(tc.arguments.get("task", "")),
                     )
-                    for tc in talk_calls
+                    for tc in delegate_calls
                 ]
                 replies = self.runtime.talk_many(
                     caller=self.actor_id,
@@ -548,16 +524,11 @@ class BaseActor:
                     ancestors=event.ancestors,
                 )
             except FGAError as e:
-                for tc in talk_calls:
+                for tc in delegate_calls:
                     results[tc.id] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
             else:
-                for tc, (path, reply) in zip(talk_calls, replies):
-                    result = {"ok": True, "path": path, "response": reply}
-                    # Heuristic code rejection on each parallel response
-                    rejection = self._reject_code_in_response(reply)
-                    if rejection:
-                        result = {"ok": False, "error": rejection, "path": path}
-                    results[tc.id] = result
+                for tc, (path, reply) in zip(delegate_calls, replies):
+                    results[tc.id] = {"ok": True, "path": path, "response": reply}
 
         return results
 
@@ -594,31 +565,35 @@ class BaseActor:
             path = self.runtime.workspace.delete_file(str(args.get("path", "")))
             self.runtime.stop_file_actor(path)
             return {"ok": True, "path": path}
-        if action == "talk":
+        if action == "delegate":
             path = str(args.get("path", ""))
-            prompt = str(args.get("prompt", ""))
-            if len(prompt) > 100:
-                raise ToolError("talk prompt must be 100 characters or fewer")
+            task = str(args.get("task", ""))
+            if not task.strip():
+                raise ToolError("delegate task must not be empty")
             response = self.runtime.talk(
                 caller=self.actor_id,
                 target=path,
-                prompt=prompt,
+                prompt=task,
                 tx_id=event.tx_id,
                 depth=event.depth + 1,
                 ancestors=event.ancestors,
             )
             return {"ok": True, "path": path, "response": response}
+        if action == "plan":
+            if not self.can_plan():
+                raise PermissionDenied("plan is only available to MainAgent")
+            return self.runtime.add_plan(str(args.get("plan", "")))
         if action == "shell":
             if not self.can_shell():
                 raise PermissionDenied("shell is only available to MainAgent")
             return self.runtime.shell(str(args.get("command", "")))
         if action == "read":
-            if not self.can_read_write():
-                raise PermissionDenied("read is only available to FileAgent")
+            if not self.can_read():
+                raise PermissionDenied("read is not available for this actor")
             return {
                 "ok": True,
                 "content": self.runtime.workspace.read_lines(
-                    self.actor_id,
+                    self._resolve_read_path(args),
                     int(args.get("start_line", 1)),
                     int(args.get("offset", 120)),
                 ),
@@ -646,6 +621,12 @@ class MainActor(BaseActor):
     def can_shell(self) -> bool:
         return True
 
+    def can_plan(self) -> bool:
+        return True
+
+    def can_search(self) -> bool:
+        return False
+
 
 @dataclass
 class FileActor(BaseActor):
@@ -662,3 +643,115 @@ class FileActor(BaseActor):
 
     def can_read_write(self) -> bool:
         return True
+
+    def can_read(self) -> bool:
+        return True
+
+
+@dataclass
+class VerifierActor(BaseActor):
+    @property
+    def system_prompt(self) -> str:
+        return VERIFIER_SYSTEM
+
+    def can_shell(self) -> bool:
+        return True
+
+    def can_read(self) -> bool:
+        return True
+
+    def can_delegate(self) -> bool:
+        return False
+
+    def _resolve_read_path(self, args: dict[str, Any]) -> str:
+        path = args.get("path")
+        if not path:
+            raise ToolError("path argument is required for VerifierActor read")
+        return path
+
+    def _get_tool_definitions(self) -> list[dict[str, Any]]:
+        tools: list[dict[str, Any]] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "ls",
+                    "description": "List files and directories in the workspace",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Directory path (optional)",
+                            }
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search for literal text across the workspace. Returns file paths with match counts, never code content.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": "Literal text to search for",
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "description": "Max results (default 20)",
+                            },
+                        },
+                        "required": ["content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "Read lines from any file in the workspace.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "File path to read",
+                            },
+                            "start_line": {
+                                "type": "integer",
+                                "description": "First line (1-based)",
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "description": "Number of lines to read",
+                            },
+                        },
+                        "required": ["path", "start_line", "offset"],
+                    },
+                },
+            },
+        ]
+        if self.can_shell():
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "shell",
+                        "description": "Run shell commands (tests, builds, type checks, lint, or verifier commands only).",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "string",
+                                    "description": "Shell command to execute",
+                                },
+                            },
+                            "required": ["command"],
+                        },
+                    },
+                }
+            )
+        return tools

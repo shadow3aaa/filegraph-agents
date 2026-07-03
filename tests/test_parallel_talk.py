@@ -26,8 +26,8 @@ class ParallelTalkTests(unittest.TestCase):
                     # One step emitting four talks at once.
                     if not any(m["role"] == "tool" for m in messages):
                         return ModelResponse(tool_calls=[
-                            ToolCall(id=f"t{i}", name="talk",
-                                     arguments={"path": t, "prompt": "work"})
+                            ToolCall(id=f"t{i}", name="delegate",
+                                     arguments={"path": t, "task": "work"})
                             for i, t in enumerate(targets)
                         ])
                     return ModelResponse(content="all done")
@@ -64,8 +64,8 @@ class ParallelTalkTests(unittest.TestCase):
                 if actor_id == "__main__":
                     if not any(m["role"] == "tool" for m in messages):
                         return ModelResponse(tool_calls=[
-                            ToolCall(id="ta", name="talk", arguments={"path": "a.py", "prompt": "x"}),
-                            ToolCall(id="tb", name="talk", arguments={"path": "b.py", "prompt": "x"}),
+                            ToolCall(id="ta", name="delegate", arguments={"path": "a.py", "task": "x"}),
+                            ToolCall(id="tb", name="delegate", arguments={"path": "b.py", "task": "x"}),
                         ])
                     # Verify each tool result carries the right file's reply.
                     tool_msgs = [m for m in messages if m["role"] == "tool"]

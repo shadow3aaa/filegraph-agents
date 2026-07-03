@@ -29,8 +29,8 @@ class ParallelLimitTests(unittest.TestCase):
                     if actor_id == "__main__":
                         if not any(m["role"] == "tool" for m in messages):
                             return ModelResponse(tool_calls=[
-                                ToolCall(id=f"t{i}", name="talk",
-                                         arguments={"path": t, "prompt": "go"})
+                                ToolCall(id=f"t{i}", name="delegate",
+                                         arguments={"path": t, "task": "go"})
                                 for i, t in enumerate(targets)
                             ])
                         return ModelResponse(content="done")

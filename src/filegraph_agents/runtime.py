@@ -9,7 +9,7 @@ import shlex
 import subprocess
 import uuid
 from pathlib import Path
-from .actor import BaseActor, FileActor, MainActor, TalkEvent
+from .actor import BaseActor, FileActor, MainActor, TalkEvent, VerifierActor
 from .config import FGAConfig
 from .errors import PermissionDenied, ToolError
 from .llm import ChatModel, LiteLLMModel
@@ -42,12 +42,18 @@ class FGARuntime:
         self.mailboxes: dict[str, ActorMailbox] = {}
         self._actors_lock = threading.Lock()
         self._log_lock = threading.Lock()
+        # Tracks how many messages have been logged per actor so log_raw()
+        # only appends new messages instead of the full history every step.
+        self._logged_count: dict[str, int] = {}
+        # Persistent plan storage for the main agent's decomposition plan.
+        self._plans: list[str] = []
         # Caps simultaneous in-flight LLM requests. The slot is only held around
         # the actual API call, never while an actor waits on nested talks, so a
         # talk chain longer than the limit cannot deadlock.
         n = self.config.max_parallel_talks
         self._llm_semaphore = threading.Semaphore(n) if n and n > 0 else None
         self.actors["__main__"] = MainActor("__main__", self)
+        self.actors["__verifier__"] = VerifierActor("__verifier__", self)
         # Init timestamped log file. FGA_LOG_DIR lets callers (e.g. sandboxed
         # eval harnesses) redirect logs out of the repo so they don't pollute a
         # diff-based submission; defaults to <repo>/outputs.
@@ -84,8 +90,8 @@ class FGARuntime:
             mb.shutdown()
 
     def get_actor(self, actor_id: str) -> BaseActor:
-        if actor_id == "__main__":
-            return self.main
+        if actor_id in self.actors:
+            return self.actors[actor_id]
         return self.ensure_file_actor(actor_id)
 
     def _mailbox_for(self, actor_id: str) -> ActorMailbox:
@@ -223,6 +229,10 @@ class FGARuntime:
         with self._llm_semaphore:
             return self.model.complete(actor_id, messages, tools)
 
+    def add_plan(self, plan: str) -> str:
+        self._plans.append(plan)
+        return f"plan #{len(self._plans)} recorded"
+
     def shutdown(self) -> None:
         with self._actors_lock:
             mailboxes = list(self.mailboxes.values())
@@ -231,7 +241,15 @@ class FGARuntime:
             mb.shutdown()
     def log_raw(self, actor_id: str, step: int, caller: str,
                 messages: list[dict], response: object) -> None:
-        """Append raw agent conversation to the run log file."""
+        """Append raw conversation of the main agent to the run log file."""
+        if actor_id != "__main__":
+            return
+        prev_count = self._logged_count.get(actor_id, 0)
+        if prev_count > len(messages):
+            prev_count = 0
+        new_messages = messages[prev_count:]
+        self._logged_count[actor_id] = len(messages)
+
         from .llm import ModelResponse
         resp_content: str
         resp_tool_calls: list = []
@@ -247,7 +265,7 @@ class FGARuntime:
             f"agent: {actor_id} | step {step} | caller: {caller}",
             "=" * 60,
         ]
-        for msg in messages:
+        for msg in new_messages:
             role = msg.get("role", "?").upper()
             content = msg.get("content", "")
             if role == "ASSISTANT" and msg.get("tool_calls"):
