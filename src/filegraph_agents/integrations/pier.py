@@ -73,6 +73,7 @@ class FGAAgent(BaseInstalledAgent):
             'if ! grep -q ".local/bin" "$HOME/.bashrc" 2>/dev/null; then '
             "echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> \"$HOME/.bashrc\"; fi\n"
             'source "$HOME/.local/bin/env"\n'
+            "uv cache clean\n"
             f"uv tool install --reinstall --python 3.11 {shlex.quote(FGA_GIT_URL)}\n"
             "fga --help >/dev/null\n"
         )
