@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import re
 from typing import Any, TYPE_CHECKING
 
 from .config import FGAConfig
 from .errors import FGAError, PermissionDenied, ToolError
-from .llm import ModelResponse, ToolCall
+from .llm import ToolCall
 from .prompts import (
     MAIN_SYSTEM,
     SUMMARIZE_SYSTEM,
@@ -155,9 +156,94 @@ class BaseActor:
         summary_text = response.content or "(summary unavailable)"
 
         self.runtime.observer.on_compact(actor_id=self.actor_id, dropped=len(older))
-        self.messages[:] = head + [
-            {"role": "user", "content": f"Summary of earlier conversation:\n{summary_text}"}
-        ] + tail
+        self.messages[:] = (
+            head
+            + [
+                {
+                    "role": "user",
+                    "content": f"Summary of earlier conversation:\n{summary_text}",
+                }
+            ]
+            + tail
+        )
+
+    @staticmethod
+    def _looks_like_code_block(response: str) -> bool:
+        """Heuristic: does the response contain significant source code?"""
+        # Triple-backtick code fence
+        if re.search(r"```", response):
+            return True
+        # Count lines that look like code: indented + programming keywords
+        code_lines = 0
+        for line in response.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith(("#", "//", "/*", "*", "--")):
+                continue
+            if stripped.startswith(
+                (
+                    "def ",
+                    "class ",
+                    "import ",
+                    "from ",
+                    "return ",
+                    "if ",
+                    "elif ",
+                    "else:",
+                    "for ",
+                    "while ",
+                    "try:",
+                    "except",
+                    "with ",
+                    "async ",
+                    "await ",
+                    "yield ",
+                    "raise ",
+                    "pass ",
+                    "break ",
+                    "continue ",
+                    "function ",
+                    "const ",
+                    "let ",
+                    "var ",
+                    "interface ",
+                    "type ",
+                    "export ",
+                    "impl ",
+                    "fn ",
+                    "pub ",
+                    "int ",
+                    "float ",
+                    "String ",
+                    "bool ",
+                    "public ",
+                    "private ",
+                    "protected ",
+                    "static ",
+                    "void ",
+                    "int ",
+                    "string ",
+                    "boolean ",
+                )
+            ):
+                code_lines += 1
+            elif line.startswith(("    ", "\t")) and any(
+                c in stripped for c in ("(", ")", "{", "}", "=", ":", "->")
+            ):
+                code_lines += 1
+            if code_lines >= 5:
+                return True
+        return False
+
+    @staticmethod
+    def _reject_code_in_response(response: str) -> str | None:
+        """Return rejection message if response contains code, else None."""
+        if BaseActor._looks_like_code_block(response):
+            return (
+                "RESPONSE REJECTED: your reply contains source code blocks. "
+                "Do NOT output code. Return a transaction report with status, "
+                "changed_symbols, delegated_to, confirmed_contracts, and unresolved."
+            )
+        return None
 
     def _get_tool_definitions(self) -> list[dict[str, Any]]:
         """Build OpenAI-compatible tool definitions from actor capabilities."""
@@ -170,7 +256,10 @@ class BaseActor:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "path": {"type": "string", "description": "Directory path (optional)"}
+                            "path": {
+                                "type": "string",
+                                "description": "Directory path (optional)",
+                            }
                         },
                     },
                 },
@@ -183,8 +272,14 @@ class BaseActor:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "content": {"type": "string", "description": "Literal text to search for"},
-                            "max_results": {"type": "integer", "description": "Max results (default 20)"},
+                            "content": {
+                                "type": "string",
+                                "description": "Literal text to search for",
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "description": "Max results (default 20)",
+                            },
                         },
                         "required": ["content"],
                     },
@@ -198,8 +293,15 @@ class BaseActor:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "path": {"type": "string", "description": "Target file path"},
-                            "prompt": {"type": "string", "description": "Question or request for the file agent", "maxLength": 100},
+                            "path": {
+                                "type": "string",
+                                "description": "Target file path",
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "Question or request for the file agent",
+                                "maxLength": 100,
+                            },
                         },
                         "required": ["path", "prompt"],
                     },
@@ -213,7 +315,10 @@ class BaseActor:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "path": {"type": "string", "description": "Path for the new file"},
+                            "path": {
+                                "type": "string",
+                                "description": "Path for the new file",
+                            },
                         },
                         "required": ["path"],
                     },
@@ -236,53 +341,77 @@ class BaseActor:
         ]
 
         if self.can_shell():
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": "shell",
-                    "description": "Run shell commands (tests, builds, type checks, lint, or verifier commands only).",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "command": {"type": "string", "description": "Shell command to execute"},
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "shell",
+                        "description": "Run shell commands (tests, builds, type checks, lint, or verifier commands only).",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "string",
+                                    "description": "Shell command to execute",
+                                },
+                            },
+                            "required": ["command"],
                         },
-                        "required": ["command"],
                     },
-                },
-            })
+                }
+            )
 
         if self.can_read_write():
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": "read",
-                    "description": "Read lines from your own file.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "start_line": {"type": "integer", "description": "First line (1-based)"},
-                            "offset": {"type": "integer", "description": "Number of lines to read"},
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        "description": "Read lines from your own file.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "start_line": {
+                                    "type": "integer",
+                                    "description": "First line (1-based)",
+                                },
+                                "offset": {
+                                    "type": "integer",
+                                    "description": "Number of lines to read",
+                                },
+                            },
+                            "required": ["start_line", "offset"],
                         },
-                        "required": ["start_line", "offset"],
                     },
-                },
-            })
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": "write",
-                    "description": "Write content to your own file. Replaces inclusive [start_line,end_line]. Use end_line=start_line-1 for insertion.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "start_line": {"type": "integer", "description": "First line to replace (1-based)"},
-                            "end_line": {"type": "integer", "description": "Last line to replace (inclusive)"},
-                            "content": {"type": "string", "description": "New content"},
+                }
+            )
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "write",
+                        "description": "Write content to your own file. Replaces inclusive [start_line,end_line]. Use end_line=start_line-1 for insertion.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "start_line": {
+                                    "type": "integer",
+                                    "description": "First line to replace (1-based)",
+                                },
+                                "end_line": {
+                                    "type": "integer",
+                                    "description": "Last line to replace (inclusive)",
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "New content",
+                                },
+                            },
+                            "required": ["start_line", "end_line", "content"],
                         },
-                        "required": ["start_line", "end_line", "content"],
                     },
-                },
-            })
+                }
+            )
 
         return tools
 
@@ -292,10 +421,12 @@ class BaseActor:
         # makes reentrancy safe: a nested talk to this same actor appends to and
         # runs over the very same message list, so there is no context split.
         self._ensure_history()
-        self.messages.append({
-            "role": "user",
-            "content": event_user_prompt(caller=event.caller, prompt=event.prompt),
-        })
+        self.messages.append(
+            {
+                "role": "user",
+                "content": event_user_prompt(caller=event.caller, prompt=event.prompt),
+            }
+        )
 
         # No per-actor step cap: an actor keeps looping until it produces a
         # reply. The empty-response guard below prevents a no-progress spin, and
@@ -331,25 +462,32 @@ class BaseActor:
                     {
                         "id": tc.id,
                         "type": "function",
-                        "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments),
+                        },
                     }
                     for tc in response.tool_calls
                 ]
-                self.messages.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": assistant_tc,
-                })
+                self.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": assistant_tc,
+                    }
+                )
 
                 results = self._execute_tool_calls(response.tool_calls, event)
                 for tc in response.tool_calls:
-                    self.messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": self._truncate(
-                            json.dumps(results[tc.id], ensure_ascii=False)
-                        ),
-                    })
+                    self.messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": self._truncate(
+                                json.dumps(results[tc.id], ensure_ascii=False)
+                            ),
+                        }
+                    )
                 continue
 
             # Neither content nor tool calls: nothing to do, and looping again
@@ -377,18 +515,31 @@ class BaseActor:
             results[tc.id] = self._run_single_tool(tc, event)
 
         if len(talk_calls) == 1:
-            results[talk_calls[0].id] = self._run_single_tool(talk_calls[0], event)
+            result = self._run_single_tool(talk_calls[0], event)
+            # Heuristic code rejection on single talk response
+            if isinstance(result, dict) and result.get("ok") and "response" in result:
+                rejection = self._reject_code_in_response(str(result["response"]))
+                if rejection:
+                    result = {
+                        "ok": False,
+                        "error": rejection,
+                        "path": result.get("path", ""),
+                    }
+            results[talk_calls[0].id] = result
         elif talk_calls:
-            # Validate all prompts before sending in parallel
-            for tc in talk_calls:
-                prompt = str(tc.arguments.get("prompt", ""))
-                if len(prompt) > 100:
-                    raise ToolError("talk prompt must be 100 characters or fewer")
-            requests = [
-                (str(tc.arguments.get("path", "")), str(tc.arguments.get("prompt", "")))
-                for tc in talk_calls
-            ]
             try:
+                # Validate all prompts before sending in parallel
+                for tc in talk_calls:
+                    prompt = str(tc.arguments.get("prompt", ""))
+                    if len(prompt) > 100:
+                        raise ToolError("talk prompt must be 100 characters or fewer")
+                requests = [
+                    (
+                        str(tc.arguments.get("path", "")),
+                        str(tc.arguments.get("prompt", "")),
+                    )
+                    for tc in talk_calls
+                ]
                 replies = self.runtime.talk_many(
                     caller=self.actor_id,
                     requests=requests,
@@ -401,7 +552,12 @@ class BaseActor:
                     results[tc.id] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
             else:
                 for tc, (path, reply) in zip(talk_calls, replies):
-                    results[tc.id] = {"ok": True, "path": path, "response": reply}
+                    result = {"ok": True, "path": path, "response": reply}
+                    # Heuristic code rejection on each parallel response
+                    rejection = self._reject_code_in_response(reply)
+                    if rejection:
+                        result = {"ok": False, "error": rejection, "path": path}
+                    results[tc.id] = result
 
         return results
 
@@ -419,13 +575,17 @@ class BaseActor:
             return text
         return text[:limit] + f"\n<truncated {len(text) - limit} chars>"
 
-    def _dispatch_action(self, action: str, args: dict[str, Any], event: TalkEvent) -> Any:
+    def _dispatch_action(
+        self, action: str, args: dict[str, Any], event: TalkEvent
+    ) -> Any:
         if action == "ls":
             return self.runtime.workspace.ls(
                 args.get("path"), default_dir=self.default_ls_dir
             )
         if action == "search":
-            return self.runtime.workspace.search(str(args.get("content", "")), max_results=args.get("max_results", 20))
+            return self.runtime.workspace.search(
+                str(args.get("content", "")), max_results=args.get("max_results", 20)
+            )
         if action == "create_file":
             path = self.runtime.workspace.create_file(str(args.get("path", "")))
             self.runtime.ensure_file_actor(path)
