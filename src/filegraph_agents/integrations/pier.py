@@ -20,7 +20,9 @@ before returning; uncommitted work would be invisible to the grader.
 
 from __future__ import annotations
 
+import subprocess
 import shlex
+from pathlib import Path
 from urllib.parse import urlparse
 
 from pier.agents.installed.base import BaseInstalledAgent
@@ -30,7 +32,21 @@ from pier.models.agent.install import AgentInstallSpec, InstallStep
 from pier.models.agent.network import NetworkAllowlist
 
 # Public repo Pier installs FGA from inside the task container.
-FGA_GIT_URL = "git+https://github.com/shadow3aaa/filegraph-agents.git"
+# Pin to the latest local commit so that `uv tool install` fetches the
+# exact version we intend, even when Docker layer caching would otherwise
+# skip the install step.
+_FGA_REPO = Path(__file__).resolve().parent.parent.parent.parent
+try:
+    _FGA_COMMIT = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(_FGA_REPO),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+except Exception:
+    _FGA_COMMIT = "main"
+FGA_GIT_URL = f"git+https://github.com/shadow3aaa/filegraph-agents.git@{_FGA_COMMIT}"
 
 # Where Pier/Harbor tasks check out the target repository.
 REPO_DIR = "/app"
@@ -128,6 +144,9 @@ class FGAAgent(BaseInstalledAgent):
                 # Keep FGA's run logs out of the repo so they don't pollute the
                 # diff-based submission.
                 "FGA_LOG_DIR": "/tmp/fga-logs",
+                # Print step-by-step tool calls and results to stdout so they
+                # appear in the Pier agent log (fga.txt) for analysis.
+                "FGA_LOG_STEPS": "1",
             }
         )
 

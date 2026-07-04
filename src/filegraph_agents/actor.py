@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 import json
@@ -16,6 +17,14 @@ from .prompts import (
     file_system,
     summarize_user_prompt,
 )
+
+_print_lock = threading.Lock()
+
+
+def _step_print(*args, **kwargs) -> None:
+    with _print_lock:
+        print(*args, **kwargs)
+
 
 if TYPE_CHECKING:
     from .runtime import FGARuntime
@@ -393,6 +402,39 @@ class BaseActor:
 
         return tools
 
+    def _step_header(self, step: int) -> str:
+        return f"{'=' * 50}\nFGA ({self.actor_id}, step {step}):\n{'-' * 50}"
+
+    def _print_tool_calls(self, step: int, tool_calls: list[ToolCall]) -> None:
+        if not self.config.log_steps:
+            return
+        _step_print(self._step_header(step))
+        for tc in tool_calls:
+            args_preview = json.dumps(tc.arguments, ensure_ascii=False)
+            if len(args_preview) > 200:
+                args_preview = args_preview[:200] + "..."
+            _step_print(f"{tc.name}({args_preview})")
+        _step_print(f"{'-' * 50}\n")
+
+    def _print_tool_results(self, results: dict[str, Any]) -> None:
+        if not self.config.log_steps:
+            return
+        for tc_id, result in results.items():
+            preview = json.dumps(result, ensure_ascii=False)
+            if len(preview) > 500:
+                preview = preview[:500] + "..."
+            _step_print(f"Tool result ({tc_id[:8]}):")
+            _step_print(preview)
+        _step_print(f"{'=' * 50}\n")
+
+    def _print_reply(self, step: int, content: str) -> None:
+        if not self.config.log_steps:
+            return
+        _step_print(f"{'=' * 50}\nFGA ({self.actor_id}, step {step}):\n{'-' * 50}")
+        preview = content if len(content) <= 500 else content[:500] + "..."
+        _step_print(preview)
+        _step_print(f"{'=' * 50}\n")
+
     def handle_talk(self, event: TalkEvent) -> str:
         # The actor keeps one persistent ReAct conversation. Each incoming talk
         # is appended as a new user turn to that same history. This is what
@@ -442,10 +484,12 @@ class BaseActor:
             if response.content is not None:
                 self.messages.append({"role": "assistant", "content": response.content})
                 self.runtime.observer.on_reply(actor_id=self.actor_id)
+                self._print_reply(step, response.content)
                 return response.content
 
             # Model wants to call tools
             if response.tool_calls:
+                self._print_tool_calls(step, response.tool_calls)
                 assistant_tc = [
                     {
                         "id": tc.id,
@@ -468,6 +512,7 @@ class BaseActor:
                 self.runtime.observer.on_pause(actor_id=self.actor_id)
                 results = self._execute_tool_calls(response.tool_calls, event)
                 self.runtime.observer.on_resume(actor_id=self.actor_id)
+                self._print_tool_results(results)
                 for tc in response.tool_calls:
                     self.messages.append(
                         {

@@ -1,0 +1,27 @@
+# Pier job config for running the built-in mini-swe-agent baseline on DeepSWE.
+#
+# Usage:
+#   pier run -c eval/deepswe-mini.yaml
+
+job_name: fga-deepswe-mini
+n_concurrent_trials: 1
+
+environment:
+  type: docker
+timeout: 1800
+
+agents:
+  - name: mini-swe-agent
+    model_name: openai/deepseek-v4-flash
+    env:
+      OPENAI_API_KEY: ${FGA_API_KEY}
+      OPENAI_BASE_URL: ${FGA_BASE_URL}
+    kwargs:
+      model_class: litellm
+      model_kwargs:
+        api_base: https://opencode.ai/zen/go/v1
+
+datasets:
+  - path: deep-swe/tasks
+    task_names:
+      - bandit-incremental-cache-control

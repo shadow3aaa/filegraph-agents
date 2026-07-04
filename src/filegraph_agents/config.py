@@ -41,6 +41,8 @@ class FGAConfig:
     chars_per_token: int = 4
 
     # The shell is intentionally not a code-reading/editing tool.
+    log_steps: bool = True
+
     forbidden_shell_commands: tuple[str, ...] = (
         "cat",
         "sed",
@@ -59,6 +61,13 @@ class FGAConfig:
         "tee",
     )
 
+    @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        val = os.getenv(name)
+        if val is None:
+            return default
+        return val.lower() not in ("0", "false", "no", "off", "")
+
     @classmethod
     def from_env(cls) -> "FGAConfig":
         return cls(
@@ -73,4 +82,5 @@ class FGAConfig:
             context_window_override=int(os.getenv("FGA_CONTEXT_WINDOW", "0")),
             context_window_fallback=int(os.getenv("FGA_CONTEXT_WINDOW_FALLBACK", "32000")),
             max_parallel_talks=int(os.getenv("FGA_MAX_PARALLEL_TALKS", "2")),
+            log_steps=cls._env_bool("FGA_LOG_STEPS", default=True),
         )

@@ -19,6 +19,11 @@ environment:
 
 agents:
   - import_path: filegraph_agents.integrations.pier:FGAAgent
+    model_name: openai/deepseek-v4-flash
+    env:
+      FGA_API_KEY: ${FGA_API_KEY}
+      FGA_BASE_URL: https://opencode.ai/zen/go/v1
+      FGA_MODEL: openai/deepseek-v4-flash
 
 datasets:
   - path: deep-swe/tasks
