@@ -20,10 +20,13 @@ class ToolCall:
 class ModelResponse:
     """Structured response from the model.
 
-    One of `content` or `tool_calls` will be set.
+    One of `content` or `tool_calls` will be set (or both).
+    `reasoning_content` is the model's chain-of-thought (DeepSeek o1/R1 etc.)
+    and must be preserved across turns so the model can continue its reasoning.
     """
     content: str | None = None
     tool_calls: list[ToolCall] | None = None
+    reasoning_content: str | None = None
 
 
 class ChatModel(Protocol):
@@ -89,6 +92,10 @@ class LiteLLMModel:
         choice = response.choices[0]
         msg = choice.message
 
+        # DeepSeek / o-series models return chain-of-thought in a separate field.
+        # Preserve it so subsequent turns can continue the same reasoning line.
+        reasoning = getattr(msg, "reasoning_content", None) or None
+
         if msg.tool_calls:
             tcs: list[ToolCall] = []
             for tc in msg.tool_calls:
@@ -97,9 +104,9 @@ class LiteLLMModel:
                 except json.JSONDecodeError:
                     args = {}
                 tcs.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
-            return ModelResponse(tool_calls=tcs)
+            return ModelResponse(tool_calls=tcs, reasoning_content=reasoning)
 
-        return ModelResponse(content=msg.content or "")
+        return ModelResponse(content=msg.content or "", reasoning_content=reasoning)
 
 
 @dataclass(slots=True)

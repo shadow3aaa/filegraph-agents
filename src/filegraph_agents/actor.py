@@ -166,14 +166,19 @@ class BaseActor:
         transcript_parts: list[str] = []
         for m in older:
             role = m.get("role", "?")
+            parts: list[str] = []
+            r = m.get("reasoning_content")
+            if r:
+                parts.append(f"thinking: {r}")
             if m.get("tool_calls"):
                 calls = ", ".join(
                     f"{tc['function']['name']}({tc['function']['arguments']})"
                     for tc in m["tool_calls"]
                 )
-                transcript_parts.append(f"[{role} tool_calls] {calls}")
-            else:
-                transcript_parts.append(f"[{role}] {m.get('content') or ''}")
+                parts.append(f"tool_calls: {calls}")
+            if m.get("content"):
+                parts.append(m["content"])
+            transcript_parts.append(f"[{role}] {' | '.join(parts)}" if parts else f"[{role}]")
         transcript = self._truncate("\n".join(transcript_parts))
 
         summary_msgs = [
@@ -482,7 +487,10 @@ class BaseActor:
 
             # Model replied directly — this is the final answer
             if response.content is not None:
-                self.messages.append({"role": "assistant", "content": response.content})
+                assistant_msg: dict[str, Any] = {"role": "assistant", "content": response.content}
+                if response.reasoning_content:
+                    assistant_msg["reasoning_content"] = response.reasoning_content
+                self.messages.append(assistant_msg)
                 self.runtime.observer.on_reply(actor_id=self.actor_id)
                 self._print_reply(step, response.content)
                 return response.content
@@ -501,13 +509,14 @@ class BaseActor:
                     }
                     for tc in response.tool_calls
                 ]
-                self.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": assistant_tc,
-                    }
-                )
+                assistant_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": assistant_tc,
+                }
+                if response.reasoning_content:
+                    assistant_msg["reasoning_content"] = response.reasoning_content
+                self.messages.append(assistant_msg)
 
                 self.runtime.observer.on_pause(actor_id=self.actor_id)
                 results = self._execute_tool_calls(response.tool_calls, event)
